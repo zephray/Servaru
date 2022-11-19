@@ -1,0 +1,14 @@
+.vscode/
+obj/
+obj_dir/
+.DS_Store
+._*
+*.vcd
+simulator
+*.bin
+*.elf
+*.dump
+*.d
+*.o
+*.log
+*.gds
