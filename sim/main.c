@@ -30,8 +30,8 @@
 #define Z_NEAR 0.1f
 #define Z_FAR 5000.0f
 
-//#define TEST_CUBE
-#define TEST_SPONZA
+#define TEST_CUBE
+//#define TEST_SPONZA
 
 static void accelerate(float *speed, float *target) {
     if (fabsf(*speed - *target) > 0.01f) {

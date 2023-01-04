@@ -22,9 +22,12 @@
 //
 #pragma once
 
+#define MIN(a, b) (a < b) ? (a) : (b)
+#define MAX(a, b) (a > b) ? (a) : (b)
+
 #define VRAM_SIZE (256 * 1024 * 1024)
 #define UNIFORM_SIZE (4 * 128)
-#define MAX_VARYING (32) // Maximum num of floats
+#define MAX_VARYING (32) // Maximum num of floats, 32 means 8 vec4
 #define TMU_COUNT (1)
 
 #define READER_COUNTER (2)
@@ -34,7 +37,7 @@
 // Each SRAM is 1R1W. Read port belongs to its prospective read, write port
 // is shared among all writers with a crossbar. Write may take several cycles.
 // In the future this may be clustered.
-#define SHARED_SIZE (MAX_VARYING * 2)
+#define SHARED_SIZE (MAX_VARYING * 4 * 2)
 
 typedef struct {
     uint32_t vbo_id;
@@ -109,3 +112,21 @@ typedef struct {
     int32_t screen_position[4];
     float varying[MAX_VARYING - 4];
 } POST_VS_VERTEX;
+
+extern S3D_CONTEXT s3d_context;
+
+float float_lerp(float factor, float r1, float r2);
+void swap(int *a, int *b);
+
+void s3d_set_pixel(FBO *fbo, int32_t x, int32_t y, uint32_t color);
+void s3d_xline(FBO *fbo, int32_t x0, int32_t y0, int32_t x1, uint32_t color);
+void s3d_yline(FBO *fbo, int32_t x0, int32_t y0, int32_t y1, uint32_t color);
+void s3d_line(FBO *fbo, int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint32_t color);
+
+void s3d_process_fragments(bool* masks, int32_t x, int32_t y, int32_t *w0,
+        int32_t *w1, int32_t *w2, POST_VS_VERTEX *v0, POST_VS_VERTEX *v1,
+        POST_VS_VERTEX *v2);
+void s3d_rasterize_triangle(POST_VS_VERTEX *v0, POST_VS_VERTEX *v1,
+        POST_VS_VERTEX *v2);
+void s3d_setup_triangle(POST_VS_VERTEX *v0, POST_VS_VERTEX *v1,
+        POST_VS_VERTEX *v2);

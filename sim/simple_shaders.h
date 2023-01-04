@@ -5,4 +5,4 @@ typedef struct {
 } UNIFORM;
 
 void simple_vs(UNIFORM *uniforms, float *attributes, float *varying, VEC4 *position);
-void simple_fs(UNIFORM *uniforms, float *varying, VEC3 *frag_color, float *frag_depth);
+void simple_fs(UNIFORM *uniforms, float *varying, float *ddx, float *ddy, VEC3 *frag_color, float *frag_depth);

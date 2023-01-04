@@ -12,7 +12,7 @@ else
 EXECUTABLE	:= main
 endif
 
-INCLUDE	:= -I.
+INCLUDE	:= -I. -I./S3D
 
 SRC := \
 	camera.c \
@@ -22,8 +22,12 @@ SRC := \
 	texture.c \
 	utils.c \
 	vecmath.c \
-	s3d.c \
-	main.c
+	main.c \
+	s3d/s3d.c \
+	s3d/fsg.c \
+	s3d/rasterizer.c \
+	s3d/setup.c \
+	s3d/tmu.c
 
 OBJ := $(addprefix $(OBJDIR)/, $(SRC:.c=.o))
 
