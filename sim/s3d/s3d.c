@@ -30,6 +30,9 @@
 #include "s3d_private.h"
 #include "simple_shaders.h"
 
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize.h"
+
 //#define DEBUG
 
 S3D_CONTEXT s3d_context;
@@ -92,6 +95,10 @@ static size_t get_pixel_width(PIXEL_FORMAT format) {
         return 16;
         break;
     }
+}
+
+uint32_t s3d_map_rgb(uint8_t r, uint8_t g, uint8_t b) {
+    return 0xff000000ul | (b << 16) | (g << 8) | (r);
 }
 
 uint32_t s3d_create_framebuffer(uint32_t width, uint32_t height, PIXEL_FORMAT format) {
@@ -164,18 +171,93 @@ uint32_t s3d_bind_vao(uint32_t ebo_id, uint32_t vbo_id, uint32_t attr_size,
     return id;
 }
 
+static void s3d_mipmap_put_pixel(uint8_t *texture, size_t width, size_t level, size_t x, size_t y, uint32_t r, uint32_t g, uint32_t b) {
+    size_t offset = 1u << level;
+    texture[y * width + (offset + x)] = r;
+    texture[(offset + y) * width + x] = g;
+    texture[(offset + y) * width + (offset + x)] = b;
+}
+
+uint8_t *s3d_create_mipmap(uint8_t *image, size_t side, size_t level) {
+    // At this point, the width should be equal to 2^^k (height = width)
+    uint8_t *temp = malloc(side * side * 3);
+    uint8_t *target = malloc(side * side * 4);
+    for (int l = level; l >= 0; l--) {
+        // Resize to target level
+        uint32_t level_side = 1ul << l;
+        stbir_resize_uint8(image, side, side, 0, temp, level_side, level_side, 0, 3);
+        // Fill in mipmap
+        for (size_t y = 0; y < level_side; y++) {
+            for (size_t x = 0; x < level_side; x++) {
+                uint8_t *pixel = &temp[(y * level_side + x) * 3];
+                uint8_t r = *pixel++;
+                uint8_t g = *pixel++;
+                uint8_t b = *pixel++;
+                s3d_mipmap_put_pixel(target, side * 2, l, x, y, r, g, b);
+            }
+        }
+    }
+    free(temp);
+    return target;
+}
+
 uint32_t s3d_load_tex(void *buffer, size_t width, size_t height, size_t channels, size_t byte_per_channel) {
     TEX tex;
-    size_t size = width * height * channels * byte_per_channel;
+    // Only support 8bpc RGB format now!
+    assert(byte_per_channel == 1);
+    if (channels == 4) {
+        // Drop A channel and try again
+        uint32_t texid;
+        uint8_t *temp = malloc(width * height * 3);
+        uint8_t *src = buffer;
+        uint8_t *dst = temp;
+        for (int i = 0; i < width * height; i++) {
+            *dst++ = *src++;
+            *dst++ = *src++;
+            *dst++ = *src++;
+            src++;
+        }
+        texid = s3d_load_tex(temp, width, height, 3, 1);
+        free(temp);
+        return texid;
+    }
+    assert(channels == 3);
+
+    // Determine the actual allocated size
+    float scale_x = (float)MAX_TEXTURE_SIZE / (float)width;
+    float scale_y = (float)MAX_TEXTURE_SIZE / (float)height;
+    float scale = fminf(scale_x, scale_y);
+    uint32_t target_width = width;
+    uint32_t target_height = height;
+    if (scale < 1.0f) {
+        printf("Scale: %f\n", scale);
+        target_width *= scale;
+        target_height *= scale;
+    }
+    // TODO: properly handle non 1:1 texture?
+    uint32_t side = MAX(target_height, target_width);
+    // Level 0 means 1x1, level 1 is 2x2, etc.
+    size_t level = (size_t)(ceilf(logf((float)side) / logf(2.0f)));
+    target_width = 1ul << level;
+    target_height = 1ul << level;
+    // Convert to format accepted by s3d_create_mipmap
+    uint8_t *temp = malloc(target_height * target_width * 3);
+    stbir_resize_uint8(buffer, width, height, 0, temp, target_width, target_height, 0, 3);
+
+    uint8_t *mipmap = s3d_create_mipmap(temp, target_width, level);
+    free(temp);
+    size_t size = target_width * target_height * 4;
     tex.address = s3d_malloc(size);
-    tex.width = width;
-    tex.height = height;
-    tex.channels = channels;
-    tex.byte_per_channel = byte_per_channel;
-    memcpy(&s3d_context.vram[tex.address], buffer, size);
+    tex.width = target_width;
+    tex.height = target_height;
+    tex.mipmap_levels = level;
+
+    memcpy(&s3d_context.vram[tex.address], mipmap, size);
+    free(mipmap);
     uint32_t id = s3d_context.tex.used_size;
     ra_push(&s3d_context.tex, &tex);
-    printf("Loaded %d x %d texture to ID %d (At 0x%08x)\n", width, height, id, tex.address);
+    printf("Loaded %d x %d (from %d x %d) texture to ID %d (At 0x%08x)\n",
+            target_width, target_height, width, height, id, tex.address);
     return id + 1;
 }
 
@@ -188,7 +270,7 @@ void s3d_bind_texture(uint32_t tmu, uint32_t tex_id) {
         s3d_context.tmu[tmu].address = tex->address;
         s3d_context.tmu[tmu].width = tex->width;
         s3d_context.tmu[tmu].height = tex->height;
-        s3d_context.tmu[tmu].fetch_width = tex->byte_per_channel * tex->channels;
+        s3d_context.tmu[tmu].mipmap_levels = tex->mipmap_levels;
     }
     else {
         s3d_context.tmu[tmu].enabled = false;
@@ -290,6 +372,14 @@ float float_lerp(float factor, float r1, float r2) {
     return r1 * factor + r2 * (1.f - factor);
 }
 
+VEC3 vec3_lerp(float factor, VEC3 r1, VEC3 r2) {
+    VEC3 result;
+    result.x = float_lerp(factor, r1.x, r2.x);
+    result.y = float_lerp(factor, r1.y, r2.y);
+    result.z = float_lerp(factor, r1.z, r2.z);
+    return result;
+}
+
 void swap(int *a, int *b) {
     int tmp = *b;
     *b = *a;
@@ -309,6 +399,7 @@ void s3d_render(uint32_t vao_id) {
     // TODO: Add in RV32IF simulator
     // TODO: Implement this thing as an scheduler, like an actual GPU
 
+#if 1
     //printf("Memory usage: %d bytes\n", s3d_context.memptr);
     VAO vao = ((VAO *)s3d_context.vao.buf)[vao_id];
     VBO vbo = ((VBO *)s3d_context.vbo.buf)[vao.vbo_id];
@@ -340,10 +431,46 @@ void s3d_render(uint32_t vao_id) {
         s3d_setup_triangle(&post_vs_vertex[0], &post_vs_vertex[1],
                 &post_vs_vertex[2]);
     }
+#endif
+
+#if 0
+    // Check texture mapping
+    // TMU tmu = s3d_context.tmu[0];
+    // if (!tmu.enabled)
+    //     return;
+    // FBO active_fbo = ((FBO *)s3d_context.fbo.buf)[s3d_context.active_fbo];
+    // uint32_t width = MIN(active_fbo.width, tmu.width * 2);
+    // uint32_t height = MIN(active_fbo.height, tmu.height * 2);
+    // for (int y = 0; y < height; y++) {
+    //     for (int x = 0; x < width; x++) {
+    //         uint32_t address = tmu.address + (y * tmu.width * 2 + x);
+    //         uint32_t r = s3d_context.vram[address];
+    //         uint32_t color = s3d_map_rgb(r, r, r);
+    //         s3d_set_pixel(&active_fbo, x, y, color); 
+    //     }
+    // }
+    TMU tmu = s3d_context.tmu[0];
+    if (!tmu.enabled)
+        return;
+    FBO active_fbo = ((FBO *)s3d_context.fbo.buf)[s3d_context.active_fbo];
+    uint32_t width = active_fbo.width;
+    uint32_t height = active_fbo.height;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            VEC2 tex_coord = {(float)x / width, (float)y / height};
+            VEC4 color = s3d_tex_lookup(0, 0, tex_coord);
+            uint32_t c = s3d_map_rgb((int)(color.x * 255.0f),
+                    (int)(color.y * 255.0f), (int)(color.z * 255.0f));
+            s3d_set_pixel(&active_fbo, x, y, c); 
+        }
+    }
+#endif
 
     //s3d_line(&fbo, 0, 0, 639, 479, 0xff0000ff);
 }
 
+int min_level = 100;
+int max_level = -1;
 
 void s3d_render_copy(uint8_t *destination) {
     FBO active_fbo = ((FBO *)s3d_context.fbo.buf)[s3d_context.active_fbo];
@@ -362,6 +489,10 @@ void s3d_render_copy(uint8_t *destination) {
         putchar('\n');
     }
 #endif
+    printf("Mipmap [%d, %d]\n", min_level, max_level);
+    min_level = 100;
+    max_level = -1;
+
     memcpy((void *)destination, (const void *)source, active_fbo.size);
 }
 
@@ -379,43 +510,4 @@ void s3d_delete_vao(uint32_t vao_id) {
 
 void s3d_delete_tex(uint32_t tex_id) {
 
-}
-
-VEC4 s3d_tex_lookup(uint32_t tmu_id, VEC2 tex_coord) {
-    TMU *tmu = &s3d_context.tmu[tmu_id];
-    VEC4 result = {0.0f, 0.0f, 0.0f, 0.0f};
-    if (!tmu->enabled)
-        return result;
-#if 1
-    // TODO: Implement proper/ configurable clamping?
-    tex_coord.x = fmodf(fabsf(tex_coord.x), 1.0f);
-    tex_coord.y = fmodf(fabsf(tex_coord.y), 1.0f);
-    /*if (tex_coord.x > 1.0f) tex_coord.x = 1.0f;
-    if (tex_coord.x < 0.0f) tex_coord.x = 0.0f;
-    if (tex_coord.y > 1.0f) tex_coord.y = 1.0f;
-    if (tex_coord.y < 0.0f) tex_coord.y = 0.0f;*/
-    //tex_coord.x = fabsf(tex_coord.x);
-    //tex_coord.y = fabsf(tex_coord.y);
-    int32_t texel_x = (int32_t)(tex_coord.x * tmu->width);
-    //texel_x %= tmu->width;
-    int32_t texel_y = (int32_t)(tex_coord.y * tmu->height);
-    //texel_y %= tmu->height;
-    uint32_t address = tmu->address + (texel_y * tmu->width + texel_x) * tmu->fetch_width;
-    // This access is likely to be unaligned!
-    uint8_t r = s3d_context.vram[address];
-    uint8_t g = s3d_context.vram[address + 1];
-    uint8_t b = s3d_context.vram[address + 2];
-    result.x = (float)r / 255.0f;
-    result.y = (float)g / 255.0f;
-    result.z = (float)b / 255.0f;
-    //printf("Texture lookup %.2f %.2f -> %d %d, result: %d %d %d\n", tex_coord.x, tex_coord.y, texel_x, texel_y, r, g, b);
-    // TODO: Implement alpha channel
-    // TODO: Implement reading from float buffer
-#else
-    result.x = tex_coord.x;
-    result.y = tex_coord.y;
-    result.z = 0;
-#endif
-    
-    return result;
 }

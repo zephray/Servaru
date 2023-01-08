@@ -30,9 +30,18 @@ void simple_vs(UNIFORM *uniforms, float *attributes, float *varying, VEC4 *posit
 void simple_fs(UNIFORM *uniforms, float *varying, float *ddx, float *ddy, VEC3 *frag_color, float *frag_depth) {
     // Input layout:
     VEC2 *tex_coords = (VEC2 *)&varying[0];
-    //print_vec2(*tex_coords, "Tex Coords");
+
+    float dxdx = ddx[0];
+    float dxdy = ddy[0];
+    float dydx = ddx[1];
+    float dydy = ddx[1];
+
+    //printf("COORD: %.2f, %.2f, PD: %.2f, %.2f, %.2f, %.2f\n", tex_coords->x, tex_coords->y,
+    //        dxdx, dxdy, dydx, dydy);
+
+    float dmax = fmaxf(fmaxf(dxdx, dxdy), fmaxf(dydx, dydy));
     
-    VEC4 tex_result = s3d_tex_lookup(0, *tex_coords);
+    VEC4 tex_result = s3d_tex_lookup(0, dmax, *tex_coords);
     frag_color->x = tex_result.x;
     frag_color->y = tex_result.y;
     frag_color->z = tex_result.z;

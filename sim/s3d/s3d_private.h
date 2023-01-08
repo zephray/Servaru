@@ -25,6 +25,8 @@
 #define MIN(a, b) (a < b) ? (a) : (b)
 #define MAX(a, b) (a > b) ? (a) : (b)
 
+#define MAX_TEXTURE_SIZE (512)
+
 #define VRAM_SIZE (256 * 1024 * 1024)
 #define UNIFORM_SIZE (4 * 128)
 #define MAX_VARYING (32) // Maximum num of floats, 32 means 8 vec4
@@ -68,8 +70,7 @@ typedef struct {
     uint32_t address;
     uint32_t width;
     uint32_t height;
-    uint32_t channels;
-    uint32_t byte_per_channel;
+    uint32_t mipmap_levels;
 } TEX;
 
 typedef struct {
@@ -77,7 +78,7 @@ typedef struct {
     uint32_t address;
     uint16_t width;
     uint16_t height;
-    uint8_t fetch_width;
+    uint8_t mipmap_levels;
 } TMU;
 
 typedef struct {
@@ -116,8 +117,10 @@ typedef struct {
 extern S3D_CONTEXT s3d_context;
 
 float float_lerp(float factor, float r1, float r2);
+VEC3 vec3_lerp(float factor, VEC3 r1, VEC3 r2);
 void swap(int *a, int *b);
 
+uint32_t s3d_map_rgb(uint8_t r, uint8_t g, uint8_t b);
 void s3d_set_pixel(FBO *fbo, int32_t x, int32_t y, uint32_t color);
 void s3d_xline(FBO *fbo, int32_t x0, int32_t y0, int32_t x1, uint32_t color);
 void s3d_yline(FBO *fbo, int32_t x0, int32_t y0, int32_t y1, uint32_t color);

@@ -77,8 +77,7 @@ void s3d_delete_vao(uint32_t vao_id);
 // Delete texture from VRAM
 void s3d_delete_tex(uint32_t tex_id);
 
-
 // For C shaders, to be removed later?
 // Or keep... IDK
 // Lookup could be up to 4x32 bit wide
-VEC4 s3d_tex_lookup(uint32_t tmu_id, VEC2 tex_coord);
+VEC4 s3d_tex_lookup(uint32_t tmu_id, float dmax, VEC2 tex_coord);

@@ -134,8 +134,9 @@ int main(int argc, char *argv[]) {
     float time_delta = 0.0f;
     int last_ticks = SDL_GetTicks();
 
-    while (!exit)
-	{
+    //exit = 1;
+
+    while (!exit) {
         int cur_ticks = SDL_GetTicks();
         time_delta -= cur_ticks - last_ticks; // Actual ticks passed since last iteration
         time_delta += 1000.0f / 30.f; // Time allocated for this iteration

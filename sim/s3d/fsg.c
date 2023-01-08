@@ -100,15 +100,15 @@ void s3d_process_fragments(bool* masks, int32_t x, int32_t y, int32_t *w0,
     }
 
     // Calculate partial derivative
-    float ddx[2][s3d_context.varying_count / 4];
-    float ddy[2][s3d_context.varying_count / 4];
+    float ddx[2][s3d_context.varying_count];
+    float ddy[2][s3d_context.varying_count];
     // Question: how does this part parallelize?
     // Probably only calculate when needed (like, texture mapping.)
-    for (uint32_t i = 0; i < s3d_context.varying_count / 4; i++) {
-        ddx[0][i] = varying[1][i * 4] - varying[0][i * 4];
-        ddx[1][i] = varying[3][i * 4] - varying[2][i * 4];
-        ddy[0][i] = varying[2][i * 4 + 1] - varying[0][i * 4 + 1];
-        ddy[1][i] = varying[3][i * 4 + 1] - varying[1][i * 4 + 1];
+    for (uint32_t i = 0; i < s3d_context.varying_count; i++) {
+        ddx[0][i] = varying[1][i] - varying[0][i];
+        ddx[1][i] = varying[3][i] - varying[2][i];
+        ddy[0][i] = varying[2][i] - varying[0][i];
+        ddy[1][i] = varying[3][i] - varying[1][i];
     }
 
     VEC3 frag_color[4];
@@ -152,7 +152,7 @@ void s3d_process_fragments(bool* masks, int32_t x, int32_t y, int32_t *w0,
             if (r < 0) r = 0;
             if (g < 0) g = 0;
             if (b < 0) b = 0;
-            uint32_t color = (b << 24) | (g << 16) | (r << 8) | 0xff;
+            uint32_t color = s3d_map_rgb(r, g, b);
             s3d_set_pixel(&fbo, xx[i], yy[i], color); 
         }
     }
