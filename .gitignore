@@ -12,3 +12,5 @@ simulator
 *.o
 *.log
 *.gds
+target/
+generated/
