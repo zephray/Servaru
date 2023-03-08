@@ -12,5 +12,5 @@ simulator
 *.o
 *.log
 *.gds
-target/
-generated/
+genrtl/
+__pycache__/
