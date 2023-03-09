@@ -20,3 +20,24 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 #
+
+ras_req_t = [
+    ["i", "left_edge", 13],
+    ["i", "right_edge", 13],
+    ["i", "upper_edge", 13],
+    ["i", "lower_edge", 13],
+    ["i", "edge0", 28],
+    ["i", "edge1", 28],
+    ["i", "edge2", 28],
+    ["i", "step0x", 13],
+    ["i", "step0y", 13],
+    ["i", "step1x", 13],
+    ["i", "step1y", 13],
+    ["i", "step2x", 13],
+    ["i", "step2y", 13]
+]
+
+ras_resp_t = [
+    ["i", "x", 13],
+    ["i", "y", 13]
+]
