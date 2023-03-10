@@ -26,9 +26,7 @@
 #include <SDL.h>
 #include <math.h>
 #include "engine.h"
-
-#define Z_NEAR 0.1f
-#define Z_FAR 5000.0f
+#include "defs.h"
 
 #define TEST_CUBE
 //#define TEST_SPONZA
@@ -43,8 +41,8 @@ static void accelerate(float *speed, float *target) {
 
 int main(int argc, char *argv[]) {
     SDL_Surface *screen;
-    int screen_width = 640;
-    int screen_height = 480;
+    int screen_width  = SCREEN_WIDTH;
+    int screen_height = SCREEN_HEIGHT;
 
     // Initialize the window
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
@@ -123,8 +121,8 @@ int main(int argc, char *argv[]) {
     const float speed = 0.2f;
 #endif
     int projection = 0; // 0 - perspective, 1 - ortho
-    float perspective_fov = 45.f;
-    float ortho_size = 100.f;
+    float perspective_fov = PERSPECTIVE_FOV;
+    float ortho_size = ORTHO_SIZE;
 
     // Simple pipeline
     mesh_render_obj(obj, &camera, FORWARD_PASS);
