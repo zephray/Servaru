@@ -1,6 +1,3 @@
-`timescale 1ns / 1ps
-`include "defines.v"
-`default_nettype none
 <% from manjuu import * %>
 //
 // Servaru
@@ -24,14 +21,4 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-module simtop(
-    input wire clk,
-    input wire rst
-);
-
-    servaru servaru(
-        .clk(clk),
-        .rst(rst)
-    );
-
-endmodule
+<% gen_defines() %>

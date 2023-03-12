@@ -21,6 +21,9 @@
 # SOFTWARE.
 #
 
+# Optional library import
+from manjuu_tilelink import *
+
 ras_req_t = [
     ["i", "left_edge", 13],
     ["i", "right_edge", 13],
