@@ -95,7 +95,7 @@ int main(int argc, char** argv) {
         };
 
         POST_VS_VERTEX p2 = {
-            {t[2][0],t[2][1]}
+            {t[2][0],t[2][1]+10}
         };
 
         print_triangle(t);
@@ -379,7 +379,7 @@ void rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2) {
             // process_fragment(x, y, edge2, edge0, edge1, v0, v1, v2);
             uint32_t color;
             uint32_t* pix_addr = ((uint32_t*)(semu->pixels))+(y*EMU_WIDTH+x);
-            if(*pix_addr & 0xFFFFFF00 == 0) {
+            if(*pix_addr != 0x000000FF) {
                 color = 0x0000FFFF;
             } else {
                 color = color_hack;

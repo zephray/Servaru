@@ -31,6 +31,22 @@
 #define TEST_CUBE
 //#define TEST_SPONZA
 
+SDL_Surface* semu;  // Frame Buffer
+SDL_Surface* sscr;  // Screen (scaled)
+SDL_Rect rsrc = {
+    .x = 0,
+    .y = 0,
+    .w = EMU_WIDTH, 
+    .h = EMU_HEIGHT
+};
+SDL_Rect rdst = {
+    .x = 0,
+    .y = 0,
+    .w = SCREEN_WIDTH, 
+    .h = SCREEN_HEIGHT
+    };
+
+
 static void accelerate(float *speed, float *target) {
     if (fabsf(*speed - *target) > 0.01f) {
         *speed += (*target - *speed) / 8.0f;
@@ -40,9 +56,8 @@ static void accelerate(float *speed, float *target) {
 }
 
 int main(int argc, char *argv[]) {
-    SDL_Surface *screen;
-    int screen_width  = SCREEN_WIDTH;
-    int screen_height = SCREEN_HEIGHT;
+    // int screen_width  = SCREEN_WIDTH;
+    // int screen_height = SCREEN_HEIGHT;
 
     // Initialize the window
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
@@ -51,25 +66,28 @@ int main(int argc, char *argv[]) {
 
     SDL_WM_SetCaption("S3D Window", NULL);
 
-    screen = SDL_SetVideoMode(screen_width, screen_height, 32, SDL_SWSURFACE);
-    assert(screen);
+    sscr = SDL_SetVideoMode(SCREEN_WIDTH, SCREEN_HEIGHT, 32, SDL_SWSURFACE);
+    semu = SDL_CreateRGBSurface(SDL_SWSURFACE, EMU_WIDTH, EMU_HEIGHT, 32, 0, 0, 0, 0);
+    assert(sscr);
+    assert(semu);
 
     SDL_WM_GrabInput(SDL_GRAB_ON);
-    SDL_WarpMouse(screen_width/2, screen_height/2);
+    SDL_WarpMouse(SCREEN_WIDTH/2, SCREEN_HEIGHT/2);
 
-    s3d_init(screen_width, screen_height);
+    s3d_init(EMU_WIDTH, EMU_HEIGHT);
     printf("Window created\n");
 
-    float aspect = (float)screen_width / (float)screen_height;
+    float aspect = (float)EMU_WIDTH / (float)EMU_HEIGHT;
 
     CAMERA camera;
     camera_init(&camera);
     camera_set_projection(&camera, RADIAN(45.0f), aspect, Z_NEAR, Z_FAR);
-    camera.position.x = 1;
-    camera.position.y = 0;
-    camera.position.z = 2;
-    camera.yaw = 240.f;
-    /*camera.pitch = 0.f;
+    camera.position.x = -0.39732;
+    camera.position.y = 1.06948;
+    camera.position.z = 1.54335;
+    camera.yaw = 282.75;
+    camera.pitch = -31.25;
+    /*
     camera.position.x = -0.88402f;
     camera.position.y = 0.30422f;
     camera.position.z = 0.13964f;
@@ -126,8 +144,8 @@ int main(int argc, char *argv[]) {
 
     // Simple pipeline
     mesh_render_obj(obj, &camera, FORWARD_PASS);
-    s3d_render_copy(screen->pixels);
-	SDL_Flip(screen);
+    s3d_render_copy(semu->pixels);
+	SDL_Flip(sscr);
 
     float time_delta = 0.0f;
     int last_ticks = SDL_GetTicks();
@@ -147,9 +165,11 @@ int main(int argc, char *argv[]) {
             case SDL_QUIT:
                 exit = true;
                 break;
+                
             case SDL_MOUSEMOTION:
                 camera_rotate(&camera, event.motion.xrel / 4.f, -event.motion.yrel / 4.f);
                 break;
+                
             case SDL_KEYDOWN:
                 switch (event.key.keysym.sym) {
                 case SDLK_ESCAPE:
@@ -237,8 +257,9 @@ int main(int argc, char *argv[]) {
             s3d_clear_color();
             s3d_clear_depth();
             mesh_render_obj(obj, &camera, FORWARD_PASS);
-            s3d_render_copy(screen->pixels);
-            SDL_Flip(screen);
+            s3d_render_copy(semu->pixels);
+            SDL_SoftStretch(semu, &rsrc, sscr, &rdst);
+            SDL_Flip(sscr);
         }
         else {
             // skip frame
