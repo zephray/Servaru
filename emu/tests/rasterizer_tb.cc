@@ -24,6 +24,7 @@
 #include "tmesh.hh"
 #include <iostream>
 #include <chrono>
+#include <algorithm>    // std::random_shuffle
 #include <thread>
 #include <iomanip>
 #include <assert.h>
@@ -35,11 +36,26 @@
 #include "fixed_math.hpp"
 #include "fixed_ios.hpp"
 
-#define EMU_WIDTH       256
-#define EMU_HEIGHT      128
-#define EMU_SCALE       2
-#define SCREEN_WIDTH    (EMU_WIDTH*EMU_SCALE)
-#define SCREEN_HEIGHT   (EMU_HEIGHT*EMU_SCALE)
+// std::mt19937 generator {114514};
+
+#define TEST_MESH
+
+#ifdef TEST_MESH
+    #define EMU_WIDTH       640
+    #define EMU_HEIGHT      480
+    #define EMU_SCALE       2
+    #define SCREEN_WIDTH    (EMU_WIDTH*EMU_SCALE)
+    #define SCREEN_HEIGHT   (EMU_HEIGHT*EMU_SCALE)
+    #define TMESH_SUBDIV 40
+#endif
+#ifdef TEST_DX10
+    #define EMU_WIDTH       16
+    #define EMU_HEIGHT      8
+    #define EMU_SCALE       32
+    #define SCREEN_WIDTH    (EMU_WIDTH*EMU_SCALE)
+    #define SCREEN_HEIGHT   (EMU_HEIGHT*EMU_SCALE)
+#endif
+
 #define Z_NEAR          0.1f
 #define Z_FAR           5000.0f
 #define PERSPECTIVE_FOV 45.f
@@ -47,7 +63,6 @@
 #define FPS_CAP         60.f
 
 
-#define TMESH_SUBDIV 40
 #define MIN(a, b) (a < b) ? (a) : (b)
 #define MAX(a, b) (a > b) ? (a) : (b)
 
@@ -76,7 +91,7 @@ typedef union {
     // float varying[MAX_VARYING - 4];
 } POST_VS_VERTEX;
 
-void rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2);
+int rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2);
 
 SDL_Surface* semu;  // Frame Buffer
 SDL_Surface* sscr;  // Screen (scaled)
@@ -99,20 +114,22 @@ int main(int argc, char** argv) {
     std::cout << "Running Rasterizer Testbench..." << std::endl << std::flush;
     // Create randomized triangle mesh
     
+#ifdef TEST_MESH
     std::vector<std::array<std::array<int,2>, 3>> triangle_coord = \
         CreateTriangleMesh(EMU_WIDTH, EMU_HEIGHT,TMESH_SUBDIV);
-    
+#endif
+#ifdef TEST_DX10
+    std::vector<std::array<std::array<float,2>, 3>> triangle_coord;
+    triangle_coord.push_back({{{{0.5,0.5}},{{1.5,3.5}},{{5.5,1.5}}}});
+#endif
 
     std::vector<std::array<std::array<fpm::fixed_24_8,2>, 3>>   triangles_fixed;
-    // std::vector<std::array<std::array<int,2>, 3>>   triangles;
-    // std::vector<std::array<std::array<float,2>, 3>> triangle_coord;
     std::vector<uint32_t>                           triangle_color;
-
-    // triangle_coord.push_back({{{{0.5,0.5}},{{1.5,3.5}},{{5.5,1.5}}}});
-    // triangle_color.push_back(0x00FF00FF);
 
     for (auto& t: triangle_coord){
         // Converting float triangle coordinates to fixed point
+        // auto t1 = t;
+        std::random_shuffle(t.begin(), t.end()); // The rasterizer has to work for all input arrangements
         triangles_fixed.push_back({{
             {{static_cast<fpm::fixed_24_8>(t[0][0]),static_cast<fpm::fixed_24_8>(t[0][1])}},
             {{static_cast<fpm::fixed_24_8>(t[1][0]),static_cast<fpm::fixed_24_8>(t[1][1])}},
@@ -137,16 +154,16 @@ int main(int argc, char** argv) {
         POST_VS_VERTEX p1 = {{t[1][0],t[1][1]}};
         POST_VS_VERTEX p2 = {{t[2][0],t[2][1]}};
 
-        print_triangle(t);
-        rasterize(&p0, &p1, &p2);
+        // print_triangle(t);
+        if(rasterize(&p0, &p1, &p2)==0) {
+            std::cout << "Failed" << std::endl;
+        }
         std::cout << std::flush;
-        ((uint32_t*)semu->pixels)[10]=0xFF00FFFF;
         SDL_PollEvent(&event);
         SDL_SoftStretch(semu, &rsrc, sscr, &rdst);
         SDL_Flip(sscr);
-        SDL_Delay(100);
+        SDL_Delay(10);
     }
-    
 
     float time_delta = 0.0f;
     int last_ticks = SDL_GetTicks();
@@ -160,7 +177,6 @@ int main(int argc, char** argv) {
         last_ticks = cur_ticks;
 
         // S3D internally uses SDL for window creation, directly use SDL functions for events
-        
         while (SDL_PollEvent(&event)) {
             switch (event.type) {
             case SDL_QUIT:
@@ -203,44 +219,31 @@ int main(int argc, char** argv) {
 }
 
 
-void rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2) {
-
+int rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2) {
     fpm::fixed_24_8 x0 = v0->screen_position[0];
     fpm::fixed_24_8 y0 = v0->screen_position[1];
     fpm::fixed_24_8 x1 = v1->screen_position[0];
     fpm::fixed_24_8 y1 = v1->screen_position[1];
     fpm::fixed_24_8 x2 = v2->screen_position[0];
     fpm::fixed_24_8 y2 = v2->screen_position[1];
-
     // Triangle setup
     fpm::fixed_24_8 step0_x, step0_y, step1_x, step1_y, step2_x, step2_y;   // Pixel Steps
+    fpm::fixed_24_8 edge0, edge1, edge2;                                    // Edge functions
     int32_t         left_edge, right_edge, upper_edge, lower_edge;          // Pixel bounds
-    fpm::fixed_24_8 edge0, edge1, edge2;            // Edge functions
-    int32_t         x, y;                           // Pixel Raster Coordinates
-
+    int32_t         x, y;                                                   // Pixel Raster Coordinates
     // If it's not even an triangle...
-    if ((x0 == x1) && (x1 == x2))   return;
-    if ((y0 == y1) && (y1 == y2))   return;
-
-    // Determine if the last 2 coordinates needs to be swapped or not...
-    // Create the edge function of 0 and 1:
-    
-    // step1_x = y0 - y1;
-    // step1_y = x1 - x0;
-    // edge1 = (x2 - x1) * step1_x + (y2 - y1) * step1_y;
-    // if (edge1 <= 0) {
-    //     // swap(&x1, &x2);
-    //     // swap(&y1, &y2);
-    //     // printf("Reversing...\n");
-    //     // return;
-    // }
+    if ((x0 == x1) && (x1 == x2))   return 0;
+    if ((y0 == y1) && (y1 == y2))   return 0;
 
     // Bonding boxes
     left_edge  = (int)floor(std::min({x0, x1, x2}));
     right_edge = (int) ceil(std::max({x0, x1, x2}));
     upper_edge = (int)floor(std::min({y0, y1, y2}));
     lower_edge = (int) ceil(std::max({y0, y1, y2}));
-
+    // std::cout << "L:" << left_edge << " R:" <<  right_edge << " T:" <<  upper_edge << " B:" <<  lower_edge << std::endl << std::flush;
+    bool flat_top = ((upper_edge==static_cast<int>(y0)?1:0)+(upper_edge==static_cast<int>(y1)?1:0)+(upper_edge==static_cast<int>(y2)?1:0))==2;
+    if(flat_top)
+        std::cout << "is flat top" << std::endl << std::flush;
     // Step vectors
     step0_x = y2 - y0;
     step0_y = x0 - x2;
@@ -249,33 +252,42 @@ void rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2) {
     step2_x = y1 - y2;
     step2_y = x2 - x1;
 
-    x = left_edge;
-    y = upper_edge;
+    // std::cout << "(" <<step0_x << "," << step0_y << "),(" <<step1_x << "," << step1_y << "),("<<step2_x << "," << step2_y << ")" << std::endl;
+    // std::cout << "(" << (float)step0_x/(float)step0_y << "),(" << (float)step1_x/(float)step1_y << "),("<< (float)step2_x/(float)step2_y << ")" << std::endl;
 
-    bool rasterizer_active = true;
+    // This is awful
+    // Determining the sign of the edge functions
+    // fpm::fixed_24_8 xc = (x0+x1+x2)/3;
+    // fpm::fixed_24_8 yc = (y0+y1+y2)/3;
+    // bool s0 = static_cast<int>((xc - x0) * step0_x + (yc - y0) * step0_y) < 0;
+    // bool s1 = static_cast<int>((xc - x1) * step1_x + (yc - y1) * step1_y) < 0;
+    // bool s2 = static_cast<int>((xc - x2) * step2_x + (yc - y2) * step2_y) < 0;
 
-    // In extreme case, value as large as X_RES ^ 2 + Y_RES ^ 2 could be stored
-    // into this variable.
-    // For 640*480: 640*640+480*480= 640000
-    // For 4096*4096: 4K^2 * 2 = 32M
-    // uint32_t should be more than sufficient.
+    bool negate = static_cast<int>( x0*y1 - x0*y2 - x1*y0 + x1*y2 + x2*y0 - x2*y1 ) < 0;
+
 #define EVAL_EDGES do {\
-    edge0 = (x - x0) * step0_x + (y - y0) * step0_y; \
-    edge1 = (x - x1) * step1_x + (y - y1) * step1_y; \
-    edge2 = (x - x2) * step2_x + (y - y2) * step2_y; \
+    edge0 = (negate?-1:1)*((x - x0) * step0_x + (y - y0) * step0_y); \
+    edge1 = (negate?-1:1)*((x - x1) * step1_x + (y - y1) * step1_y); \
+    edge2 = (negate?-1:1)*((x - x2) * step2_x + (y - y2) * step2_y); \
 } while(0)
 
 #define IMPL0
-
+// TODO: left edge and top edge
+int rastcnt = 0;
 #ifdef IMPL0
-    for (x=left_edge;x<right_edge;x++){
-        for (y=upper_edge;y<lower_edge;y++){
+    bool fill_rule;
+    bool at_flat_top;
+    for (y=upper_edge;y<lower_edge+2;y++){
+        at_flat_top = (y==upper_edge&&flat_top);
+        fill_rule = true;
+        for (x=left_edge;x<right_edge+2;x++){
             EVAL_EDGES;
             int e0 = static_cast<int>(edge0);
             int e1 = static_cast<int>(edge1);
             int e2 = static_cast<int>(edge2);
-            if ((e0 >= 0) && (e1 >= 0) && (e2 >= 0)){
-                // std::cout << "Point: " << x << ',' << y << std::endl << std::flush;
+            bool in_area = (fill_rule||at_flat_top) ? (e0 >= 0) && (e1 >= 0) && (e2 >= 0) : (e0 > 0) && (e1 > 0) && (e2 > 0);
+            if (in_area){
+                fill_rule = false;
                 uint32_t color;
                 uint32_t* pix_addr = ((uint32_t*)(semu->pixels))+(y*EMU_WIDTH+x);
                 if(*pix_addr != 0x000000FF) {
@@ -284,11 +296,16 @@ void rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2) {
                     color = color_hack;
                 }
                 *pix_addr = color;
+                rastcnt += 1;
             }
         }
     }
+
+    return rastcnt;
 #endif
 #ifdef IMPL1
+
+    int rastcnt = 0;
     bool hysteresis = false;
     for (x=left_edge;x<right_edge+2;x++){
         for (y=upper_edge;y<lower_edge+2;y++){
@@ -307,6 +324,7 @@ void rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2) {
                     color = color_hack;
                 }
                 *pix_addr = color;
+                rastcnt++;
             }
             if(hysteresis)
                 hysteresis = false;
@@ -315,9 +333,7 @@ void rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2) {
         }
         hysteresis = false;
     }
+    return rastcnt;
 #endif
-
-
-
 }
 
