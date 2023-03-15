@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 //
-#include "../defs.h"
+// #include "../defs.h"
 #include "tmesh.hh"
 #include <iostream>
 #include <chrono>
@@ -28,23 +28,51 @@
 #include <iomanip>
 #include <assert.h>
 #include <SDL.h>
+#include <SDL/SDL_draw.h>
 #include "vecmath.h"
+
+#include "fixed.hpp"
+#include "fixed_math.hpp"
+#include "fixed_ios.hpp"
+
+#define EMU_WIDTH       256
+#define EMU_HEIGHT      128
+#define EMU_SCALE       2
+#define SCREEN_WIDTH    (EMU_WIDTH*EMU_SCALE)
+#define SCREEN_HEIGHT   (EMU_HEIGHT*EMU_SCALE)
+#define Z_NEAR          0.1f
+#define Z_FAR           5000.0f
+#define PERSPECTIVE_FOV 45.f
+#define ORTHO_SIZE      100.f
+#define FPS_CAP         60.f
+
 
 #define TMESH_SUBDIV 40
 #define MIN(a, b) (a < b) ? (a) : (b)
 #define MAX(a, b) (a > b) ? (a) : (b)
 
-void print_triangle(std::array<std::array<int,2>, 3> t) {
+/*
+int asr(int value, int amount) {
+    #define USES_ARITHMETIC_SHR(TYPE) ((TYPE)(-1) >> 1 == (TYPE)(-1))
+    return !USES_ARITHMETIC_SHR(int) && value < 0 ? ~(~value >> amount) : value >> amount ;
+}
+*/
+int asr(int value, int amount) {
+    return value < 0 ? ~(~value >> amount) : value >> amount ;
+}
+
+
+void print_triangle(std::array<std::array<fpm::fixed_24_8,2>, 3> t) {
     std::cout << "< [" <<  t[0][0] << ',' <<t[0][1];
     std::cout << "] [" <<  t[1][0] << ',' <<t[1][1];
     std::cout << "] [" <<  t[2][0] << ',' <<t[2][1] << "] >" << std::endl;
     return;
 };
 
-typedef struct {
-    // TODO: Keep these as a union... if that ever matters
+typedef union {
     // VEC4 position; // Not kept after rasterization step, only for clipping
-    int32_t screen_position[4];
+    fpm::fixed_24_8 screen_position[4];
+    // uint32_t        pixel_position[4];
     // float varying[MAX_VARYING - 4];
 } POST_VS_VERTEX;
 
@@ -70,8 +98,27 @@ int main(int argc, char** argv) {
     std::cout << "FB Size: " << EMU_WIDTH << EMU_HEIGHT << std::endl;
     std::cout << "Running Rasterizer Testbench..." << std::endl << std::flush;
     // Create randomized triangle mesh
-    std::vector<std::array<std::array<int,2>, 3>> triangles = \
+    
+    std::vector<std::array<std::array<int,2>, 3>> triangle_coord = \
         CreateTriangleMesh(EMU_WIDTH, EMU_HEIGHT,TMESH_SUBDIV);
+    
+
+    std::vector<std::array<std::array<fpm::fixed_24_8,2>, 3>>   triangles_fixed;
+    // std::vector<std::array<std::array<int,2>, 3>>   triangles;
+    // std::vector<std::array<std::array<float,2>, 3>> triangle_coord;
+    std::vector<uint32_t>                           triangle_color;
+
+    // triangle_coord.push_back({{{{0.5,0.5}},{{1.5,3.5}},{{5.5,1.5}}}});
+    // triangle_color.push_back(0x00FF00FF);
+
+    for (auto& t: triangle_coord){
+        // Converting float triangle coordinates to fixed point
+        triangles_fixed.push_back({{
+            {{static_cast<fpm::fixed_24_8>(t[0][0]),static_cast<fpm::fixed_24_8>(t[0][1])}},
+            {{static_cast<fpm::fixed_24_8>(t[1][0]),static_cast<fpm::fixed_24_8>(t[1][1])}},
+            {{static_cast<fpm::fixed_24_8>(t[2][0]),static_cast<fpm::fixed_24_8>(t[2][1])}}
+        }});
+    }
 
     SDL_FillRect(sscr,&rdst,0x000000FF);
     SDL_FillRect(semu,&rsrc,0x000000FF);
@@ -80,23 +127,15 @@ int main(int argc, char** argv) {
     SDL_Flip(sscr);
 
     // Rasterize!
-    int n_trig = triangles.size();
+    int n_trig = triangles_fixed.size();
     int i_trig = 0;
-    for (auto& t: triangles) {
+    for (auto& t: triangles_fixed) {
         uint8_t gray = 255*((float)i_trig/(float)n_trig/2.f)+128;
         color_hack = gray<<24|gray<<16|gray<<8|0xFF;
         i_trig+=1;
-        POST_VS_VERTEX p0 = {
-            {t[0][0],t[0][1]}
-        };
-
-        POST_VS_VERTEX p1 = {
-            {t[1][0],t[1][1]}
-        };
-
-        POST_VS_VERTEX p2 = {
-            {t[2][0],t[2][1]+10}
-        };
+        POST_VS_VERTEX p0 = {{t[0][0],t[0][1]}};
+        POST_VS_VERTEX p1 = {{t[1][0],t[1][1]}};
+        POST_VS_VERTEX p2 = {{t[2][0],t[2][1]}};
 
         print_triangle(t);
         rasterize(&p0, &p1, &p2);
@@ -105,7 +144,7 @@ int main(int argc, char** argv) {
         SDL_PollEvent(&event);
         SDL_SoftStretch(semu, &rsrc, sscr, &rdst);
         SDL_Flip(sscr);
-        SDL_Delay(10);
+        SDL_Delay(100);
     }
     
 
@@ -163,106 +202,46 @@ int main(int argc, char** argv) {
     return 0;
 }
 
-typedef enum {
-    STEP_NONE,
-    STEP_RIGHT,
-    STEP_DOWN,
-    STEP_LEFT
-} RAS_STEP_DIR;
-
-typedef enum {
-    ST_SCAN_RIGHT_FOR_LEFT_EDGE,
-    ST_SWEEP_RIGHT,
-    ST_STEPPED_RIGHT_DOWN,
-    ST_SCAN_LEFT_FOR_RIGHT_EDGE,
-    ST_SCAN_RIGHT_FOR_RIGHT_EDGE,
-    ST_SWEEP_LEFT,
-    ST_STEPPED_LEFT_DOWN,
-    ST_SCAN_LEFT_FOR_LEFT_EDGE
-} RAS_STATE;
-
-typedef enum {
-    COND_OUTSIDE,
-    COND_INSIDE,
-    COND_LEFT_EDGE,
-    COND_RIGHT_EDGE
-} RAS_COND;
-
-const char *state_names[] = {
-    "ST_SCAN_RIGHT_FOR_LEFT_EDGE",
-    "ST_SWEEP_RIGHT",
-    "ST_STEPPED_RIGHT_DOWN",
-    "ST_SCAN_LEFT_FOR_RIGHT_EDGE",
-    "ST_SCAN_RIGHT_FOR_RIGHT_EDGE",
-    "ST_SWEEP_LEFT",
-    "ST_STEPPED_LEFT_DOWN",
-    "ST_SCAN_LEFT_FOR_LEFT_EDGE"
-};
-
-const char *cond_names[] = {
-    "COND_OUTSIDE",
-    "COND_INSIDE",
-    "COND_LEFT_EDGE",
-    "COND_RIGHT_EDGE"
-};
 
 void rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2) {
-    // Rasterizer takes 2D coordinates as input
-    // Generate fragments (with 2D coordinates)
-    // How about let it run at a rate of ... 2 pixel per clock?
-    // Note this unit would be eventually shared by multiple shaders
-   // Rasterizer takes 2D coordinates as input
-    // Generate fragments (with 2D coordinates)
-    // How about let it run at a rate of ... 2 pixel per clock?
-    // Note this unit would be eventually shared by multiple shaders
-    RAS_STATE state = ST_SCAN_RIGHT_FOR_LEFT_EDGE;
-    RAS_STATE next_state;
-    RAS_STEP_DIR step_dir;
-    RAS_COND cond;
 
-    int32_t x0 = v0->screen_position[0];
-    int32_t y0 = v0->screen_position[1];
-    int32_t x1 = v1->screen_position[0];
-    int32_t y1 = v1->screen_position[1];
-    int32_t x2 = v2->screen_position[0];
-    int32_t y2 = v2->screen_position[1];
+    fpm::fixed_24_8 x0 = v0->screen_position[0];
+    fpm::fixed_24_8 y0 = v0->screen_position[1];
+    fpm::fixed_24_8 x1 = v1->screen_position[0];
+    fpm::fixed_24_8 y1 = v1->screen_position[1];
+    fpm::fixed_24_8 x2 = v2->screen_position[0];
+    fpm::fixed_24_8 y2 = v2->screen_position[1];
 
     // Triangle setup
-    // TODO: move these out of the function.
-    int32_t step0_x, step0_y, step1_x, step1_y, step2_x, step2_y;
-    int32_t left_edge, right_edge, upper_edge, lower_edge;
-    int32_t edge0, edge1, edge2;
-    int32_t x, y;
+    fpm::fixed_24_8 step0_x, step0_y, step1_x, step1_y, step2_x, step2_y;   // Pixel Steps
+    int32_t         left_edge, right_edge, upper_edge, lower_edge;          // Pixel bounds
+    fpm::fixed_24_8 edge0, edge1, edge2;            // Edge functions
+    int32_t         x, y;                           // Pixel Raster Coordinates
 
     // If it's not even an triangle...
-    if ((x0 == x1) && (x1 == x2))
-        return;
-    if ((y0 == y1) && (y1 == y2))
-        return;
+    if ((x0 == x1) && (x1 == x2))   return;
+    if ((y0 == y1) && (y1 == y2))   return;
 
     // Determine if the last 2 coordinates needs to be swapped or not...
     // Create the edge function of 0 and 1:
-    step1_x = y0 - y1;
-    step1_y = x1 - x0;
-    edge1 = (x2 - x1) * step1_x + (y2 - y1) * step1_y;
-    if (edge1 <= 0) {
-        /*swap(&x1, &x2);
-        swap(&y1, &y2);
-        printf("Reversing...\n");*/
-        return;
-    }
+    
+    // step1_x = y0 - y1;
+    // step1_y = x1 - x0;
+    // edge1 = (x2 - x1) * step1_x + (y2 - y1) * step1_y;
+    // if (edge1 <= 0) {
+    //     // swap(&x1, &x2);
+    //     // swap(&y1, &y2);
+    //     // printf("Reversing...\n");
+    //     // return;
+    // }
 
-    left_edge = MIN(x0, x1);
-    left_edge = MIN(left_edge, x2);
-    left_edge  -= 2;
-    right_edge = MAX(x0, x1);
-    right_edge = MAX(right_edge, x2);
-    right_edge += 2;
-    upper_edge = MIN(y0, y1);
-    upper_edge = MIN(upper_edge, y2);
-    lower_edge = MAX(y0, y1);
-    lower_edge = MAX(lower_edge, y2);
+    // Bonding boxes
+    left_edge  = (int)floor(std::min({x0, x1, x2}));
+    right_edge = (int) ceil(std::max({x0, x1, x2}));
+    upper_edge = (int)floor(std::min({y0, y1, y2}));
+    lower_edge = (int) ceil(std::max({y0, y1, y2}));
 
+    // Step vectors
     step0_x = y2 - y0;
     step0_y = x0 - x2;
     step1_x = y0 - y1;
@@ -273,7 +252,6 @@ void rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2) {
     x = left_edge;
     y = upper_edge;
 
-
     bool rasterizer_active = true;
 
     // In extreme case, value as large as X_RES ^ 2 + Y_RES ^ 2 could be stored
@@ -281,136 +259,65 @@ void rasterize(POST_VS_VERTEX* v0, POST_VS_VERTEX* v1, POST_VS_VERTEX* v2) {
     // For 640*480: 640*640+480*480= 640000
     // For 4096*4096: 4K^2 * 2 = 32M
     // uint32_t should be more than sufficient.
-    edge0 = (x - x0) * step0_x + (y - y0) * step0_y;
-    edge1 = (x - x1) * step1_x + (y - y1) * step1_y;
-    edge2 = (x - x2) * step2_x + (y - y2) * step2_y;
+#define EVAL_EDGES do {\
+    edge0 = (x - x0) * step0_x + (y - y0) * step0_y; \
+    edge1 = (x - x1) * step1_x + (y - y1) * step1_y; \
+    edge2 = (x - x2) * step2_x + (y - y2) * step2_y; \
+} while(0)
 
-    uint32_t loop_counter = 0;
+#define IMPL0
 
-    while (rasterizer_active) {
-        // Evaluate edge functions
-        bool inside = ((edge0 >= 0) && (edge1 >= 0) && (edge2 >= 0));
-        if (inside)
-            cond = COND_INSIDE;
-        else if (x == left_edge)
-            cond = COND_LEFT_EDGE;
-        else if (x == right_edge)
-            cond = COND_RIGHT_EDGE;
-        else
-            cond = COND_OUTSIDE;
-        
-        // This pixel valid is a mask: if it's false, the output is disgarded.
-        // It doesn't necessarily means it's currently producing a valid pixel.
-        bool pixel_valid;
-        
-        switch (state) {
-        case ST_SCAN_RIGHT_FOR_LEFT_EDGE:
-            switch (cond) {
-            case COND_OUTSIDE:      step_dir = STEP_RIGHT;  pixel_valid = false; next_state = ST_SCAN_RIGHT_FOR_LEFT_EDGE; break;
-            case COND_INSIDE:       step_dir = STEP_RIGHT;  pixel_valid = true;  next_state = ST_SWEEP_RIGHT; break;
-            case COND_LEFT_EDGE:    step_dir = STEP_RIGHT;  pixel_valid = true;  next_state = ST_SCAN_RIGHT_FOR_LEFT_EDGE; break;
-            case COND_RIGHT_EDGE:   step_dir = STEP_DOWN;   pixel_valid = false; next_state = ST_STEPPED_RIGHT_DOWN; break;
+#ifdef IMPL0
+    for (x=left_edge;x<right_edge;x++){
+        for (y=upper_edge;y<lower_edge;y++){
+            EVAL_EDGES;
+            int e0 = static_cast<int>(edge0);
+            int e1 = static_cast<int>(edge1);
+            int e2 = static_cast<int>(edge2);
+            if ((e0 >= 0) && (e1 >= 0) && (e2 >= 0)){
+                // std::cout << "Point: " << x << ',' << y << std::endl << std::flush;
+                uint32_t color;
+                uint32_t* pix_addr = ((uint32_t*)(semu->pixels))+(y*EMU_WIDTH+x);
+                if(*pix_addr != 0x000000FF) {
+                    color = 0x0000FFFF;
+                } else {
+                    color = color_hack;
+                }
+                *pix_addr = color;
             }
-            break;
-        case ST_SWEEP_RIGHT:
-            switch (cond) {
-            case COND_OUTSIDE:      step_dir = STEP_DOWN;   pixel_valid = false; next_state = ST_STEPPED_RIGHT_DOWN; break;
-            case COND_INSIDE:       step_dir = STEP_RIGHT;  pixel_valid = true;  next_state = ST_SWEEP_RIGHT; break;
-            case COND_LEFT_EDGE:    step_dir = STEP_RIGHT;  pixel_valid = true;  next_state = ST_SWEEP_RIGHT; break;
-            case COND_RIGHT_EDGE:   step_dir = STEP_DOWN;   pixel_valid = false; next_state = ST_SWEEP_LEFT; break;
-            }
-            break;
-        case ST_STEPPED_RIGHT_DOWN:
-            switch (cond) {
-            case COND_OUTSIDE:      step_dir = STEP_LEFT;   pixel_valid = false; next_state = ST_SCAN_LEFT_FOR_RIGHT_EDGE; break;
-            case COND_INSIDE:       step_dir = STEP_RIGHT;  pixel_valid = false; next_state = ST_SCAN_RIGHT_FOR_RIGHT_EDGE; break;
-            case COND_LEFT_EDGE:    assert(0); break;
-            case COND_RIGHT_EDGE:   step_dir = STEP_LEFT;   pixel_valid = false; next_state = ST_SCAN_LEFT_FOR_RIGHT_EDGE; break;
-            }
-            break;
-        case ST_SCAN_LEFT_FOR_RIGHT_EDGE:
-            switch (cond) {
-            case COND_OUTSIDE:      step_dir = STEP_LEFT;   pixel_valid = false; next_state = ST_SCAN_LEFT_FOR_RIGHT_EDGE; break;
-            case COND_INSIDE:       step_dir = STEP_LEFT;   pixel_valid = true;  next_state = ST_SWEEP_LEFT; break;
-            case COND_LEFT_EDGE:    step_dir = STEP_RIGHT;  pixel_valid = false; next_state = ST_SCAN_RIGHT_FOR_LEFT_EDGE; break;
-            case COND_RIGHT_EDGE:   assert(0); break;
-            }
-            break;
-        case ST_SCAN_RIGHT_FOR_RIGHT_EDGE:
-            switch (cond) {
-            case COND_OUTSIDE:      step_dir = STEP_LEFT;   pixel_valid = false; next_state = ST_SWEEP_LEFT; break;
-            case COND_INSIDE:       step_dir = STEP_RIGHT;  pixel_valid = false; next_state = ST_SCAN_RIGHT_FOR_RIGHT_EDGE; break;
-            case COND_LEFT_EDGE:    assert(0); break;
-            case COND_RIGHT_EDGE:   step_dir = STEP_LEFT;   pixel_valid = true;  next_state = ST_SWEEP_LEFT; break;
-            }
-            break;
-        case ST_SWEEP_LEFT:
-            switch (cond) {
-            case COND_OUTSIDE:      step_dir = STEP_DOWN;   pixel_valid = false; next_state = ST_STEPPED_LEFT_DOWN; break;
-            case COND_INSIDE:       step_dir = STEP_LEFT;   pixel_valid = true;  next_state = ST_SWEEP_LEFT; break;
-            case COND_LEFT_EDGE:    step_dir = STEP_DOWN;   pixel_valid = true;  next_state = ST_SWEEP_RIGHT; break;
-            case COND_RIGHT_EDGE:   step_dir = STEP_LEFT;   pixel_valid = true;  next_state = ST_SWEEP_LEFT; break;
-            }
-            break;
-        case ST_STEPPED_LEFT_DOWN:
-            switch (cond) {
-            case COND_OUTSIDE:      step_dir = STEP_RIGHT;  pixel_valid = false; next_state = ST_SCAN_RIGHT_FOR_LEFT_EDGE; break;
-            case COND_INSIDE:       step_dir = STEP_LEFT;   pixel_valid = false; next_state = ST_SCAN_LEFT_FOR_LEFT_EDGE; break;
-            case COND_LEFT_EDGE:    assert(0); break;
-            case COND_RIGHT_EDGE:   assert(0); break;
-            }
-            break;
-        case ST_SCAN_LEFT_FOR_LEFT_EDGE:
-            switch (cond) {
-            case COND_OUTSIDE:      step_dir = STEP_RIGHT;  pixel_valid = false; next_state = ST_SWEEP_RIGHT; break;
-            case COND_INSIDE:       step_dir = STEP_LEFT;   pixel_valid = false; next_state = ST_SCAN_LEFT_FOR_LEFT_EDGE; break;
-            case COND_LEFT_EDGE:    step_dir = STEP_RIGHT;  pixel_valid = true;  next_state = ST_SCAN_RIGHT_FOR_LEFT_EDGE; break;
-            case COND_RIGHT_EDGE:   step_dir = STEP_LEFT;   pixel_valid = false; next_state = ST_SCAN_LEFT_FOR_LEFT_EDGE; break;
-            }
-            break;
-        }
-
-        //printf("X %d, Y %d, state %s, next_state %s\n", x, y, state_names[state], state_names[next_state]);
-
-        // Processed pixel:
-        if (inside && pixel_valid) {
-            //s3d_set_pixel(&fbo, x, y, 0xffffffff);
-            //printf("Valid pixel %d %d %d %d %d\n", x, y, edge0, edge1, edge2);
-            // process_fragment(x, y, edge2, edge0, edge1, v0, v1, v2);
-            uint32_t color;
-            uint32_t* pix_addr = ((uint32_t*)(semu->pixels))+(y*EMU_WIDTH+x);
-            if(*pix_addr != 0x000000FF) {
-                color = 0x0000FFFF;
-            } else {
-                color = color_hack;
-            }
-            *pix_addr = color;
-        }
-        else {
-            //printf("Invalid pixel %d %d %d\n", edge0, edge1, edge2);
-        }
-
-
-        // Stepping based on the direction
-        switch (step_dir) {
-        case STEP_DOWN:  edge0 += step0_y; edge1 += step1_y; edge2 += step2_y; y += 1; break;
-        case STEP_LEFT:  edge0 -= step0_x; edge1 -= step1_x; edge2 -= step2_x; x -= 1; break;
-        case STEP_RIGHT: edge0 += step0_x; edge1 += step1_x; edge2 += step2_x; x += 1; break;
-        default: break; // Ignore step_none
-        }
-
-        // Exit
-        if (y == lower_edge)
-            rasterizer_active = false;
-
-        state = next_state;
-
-        loop_counter++;
-        if (loop_counter > 640*480) {
-            printf("Infinite loop detected!\n");
-            return;
         }
     }
+#endif
+#ifdef IMPL1
+    bool hysteresis = false;
+    for (x=left_edge;x<right_edge+2;x++){
+        for (y=upper_edge;y<lower_edge+2;y++){
+            EVAL_EDGES;
+            int e0 = static_cast<int>(edge0);
+            int e1 = static_cast<int>(edge1);
+            int e2 = static_cast<int>(edge2);
+            bool in_area = ((e0 >= 0) && (e1 >= 0) && (e2 >= 0));
+            if (in_area||hysteresis){
+                // std::cout << "Point: " << x << ',' << y << std::endl << std::flush;
+                uint32_t color;
+                uint32_t* pix_addr = ((uint32_t*)(semu->pixels))+(y*EMU_WIDTH+x);
+                if(*pix_addr != 0x000000FF) {
+                    color = 0x0000FFFF;
+                } else {
+                    color = color_hack;
+                }
+                *pix_addr = color;
+            }
+            if(hysteresis)
+                hysteresis = false;
+            if(in_area)
+                hysteresis = true;
+        }
+        hysteresis = false;
+    }
+#endif
 
-    printf("Rasterization done.\n");
+
+
 }
+

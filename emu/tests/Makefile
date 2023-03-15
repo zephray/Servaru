@@ -5,9 +5,8 @@ OBJDIR	:= ./
 LIBRARIES	:= $(shell pkg-config sdl --libs) -lm /usr/local/lib/libSDL_draw.a
 INCLUDE	:= -I../ -I../s3d  -I/usr/local/include/ -I.
 SRC := \
-    clipper_tb.cc
-
-#	rasterizer_tb.cc
+	rasterizer_tb.cc
+    # clipper_tb.cc
 
 EXECUTABLE := a.out
 
