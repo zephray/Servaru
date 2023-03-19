@@ -44,3 +44,27 @@ ras_resp_t = [
     ["i", "x", 13],
     ["i", "y", 13]
 ]
+
+rop_csr_t = [
+    ["i", "fb_base", 32],
+    ["i", "fb_width", 13],
+    ["i", "fb_format", 2],
+    ["i", "rgb_blend_mode", 3],
+    ["i", "alpha_blend_mode", 3],
+    ["i", "srgb", 9],
+    ["i", "drgb", 9],
+    ["i", "sa", 9],
+    ["i", "da", 9]
+]
+
+define("FMT_Y8", "2'd0")
+define("FMT_RGB16", "2'd1")
+define("FMT_ARGB32", "2'd2") # Integer 8 bpc
+define("FMT_ARGB128", "2'd3") # Float 32 bpc, not supported
+
+define("BLEND_NOP", "3'd0")
+define("BLEND_ADD", "3'd1")
+define("BLEND_SUBTRACT", "3'd2")
+define("BLEND_REVERSE_SBUTRACT", "3'd3")
+define("BLEND_MIN", "3'd4")
+define("BLEND_MAX", "3'd5")

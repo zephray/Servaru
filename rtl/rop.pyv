@@ -1,0 +1,269 @@
+`timescale 1ns / 1ps
+`include "defines.v"
+`default_nettype none
+<% from manjuu import *
+%>
+//
+// Servaru
+// Copyright 2023 Wenting Zhang
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+module rop(
+    input wire clk,
+    input wire rst,
+    // Control
+    <% gen_port("csr", rop_csr_t) %>
+    // Input pixel
+    <% gen_port("in", handshake(ras_resp_t)) %>
+    // Raster cache interface
+    <% gen_port("rc", reverse(tl_ul_t()), last_comma = False) %>
+);
+
+    // The goal is to implement OpenGL-compatible blending operation
+    // Orgb = srgb * Srgb + drgb * Drgb
+    // Oa = sa * Sa + da * Da
+    // It works with integer value only
+
+    // TODO: Currently it calculate the target address using a big multiplier
+    // Should this be stepped at rasterizer stage and passed down here?
+    // Depending on the number of in-flight pixels, this could be a ton of
+    // registers. On the other hand, for the multiplier approach, a 12-bit
+    // multiplier should be sufficient.
+
+    // pipeline:
+    // stage 1:
+    // calculate framebuffer address multiply
+    // stage 2:
+    // calculate framebuffer address add + align and register output to memory
+    // stage 3:
+    // address and request send to memory
+    // stage 4:
+    // seperate memory output into ARGB (keep processing minimun here)
+    // stage 5:
+    // calculate output ARGB multiply
+    // stage 6:
+    // calculate output ARGB add, overlap with stage 2
+    
+    // After stage 5, the result is injected into stage 2, stalling stage 1
+    // So when blending is enabled, throughput is reduced to 0.5 pixel per cycle 
+
+    wire [25:0] s0_fb_mult =  csr_fb_width * in_y;
+    wire [7:0] s0_src_argb = 32'h7f00; // TODO
+
+    // S1 register
+    reg s1_valid;
+    reg [25:0] s1_reg_fb_mult;
+    reg [12:0] s1_reg_x;
+    reg [31:0] s1_reg_src_argb;
+
+    // S1 wire
+    localparam S1_SRC_INPUT = 1'd0;
+    localparam S1_SRC_BLEND = 1'd1;
+
+    wire blend_en = (rgb_blend_op != `BLEND_NOP) ||
+            (alpha_blend_op != `BLEND_NOP);
+
+    wire [29:0] s1_fb_add = s1_reg_fb_mult + s1_reg_x;
+    wire [31:0] s1_fb_add_shift =
+            (csr_fb_format == `FMT_Y8) ? {2'b0, s1_fb_add} :
+            (csr_fb_format == `FMT_RGB16) ? {1'b0, s1_fb_add, 1'b0} :
+            (csr_fb_format == `FMT_ARGB32) ? {s1_fb_add, 2'b0} : 32'bx;
+    wire [31:0] s1_fb_addr = s1_fb_add_shift | csr_fb_base;
+    wire s1_src_wb = s6_valid;
+    
+    wire [7:0] s1_ca = s1_src_wb ? s6_oa : s1_reg_src_argb[31:24];
+    wire [7:0] s1_cr = s1_src_wb ? s6_or : s1_reg_src_argb[23:16];
+    wire [7:0] s1_cg = s1_src_wb ? s6_og : s1_reg_src_argb[15:8];
+    wire [7:0] s1_cb = s1_src_wb ? s6_ob : s1_reg_src_argb[7:0];
+    wire [7:0] s1_cy8 = s1_reg_sb;
+    wire [15:0] s1_crgb16 = {s1_cr[7:3], s1_cg[7:2], s1_cb[7:3]};
+    wire [31:0] s1_cargb32 = {s1_ca, s1_cr, s1_cg, s1_cb}; 
+    wire [31:0] s1_req_data =
+            (csr_fb_format == `FMT_Y8) ? {s1_cy8, s1_cy8, s1_cy8, s1_cy8} :
+            (csr_fb_format == `FMT_RGB16) ? {s1_crgb16, s1_crgb16} :
+            (csr_fb_format == `FMT_ARGB32) ? {s1_cargb32} : 32'bx;
+    wire [31:0] s1_req_addr = s1_src_wb ? s6_reg_fb_addr : s1_fb_addr;
+    wire [2:0] s1_req_opcode = (blend_en) ? `TL_OP_Get : `TL_OP_PutFullData;
+
+    // S2 register
+    reg s2_valid;
+    reg [31:0] s2_reg_fb_addr;
+    reg [31:0] s2_reg_src_argb;
+
+    // S3 register
+    reg s3_valid;
+    reg [31:0] s3_reg_fb_addr;
+    reg [31:0] s3_reg_src_argb;
+
+    // S4 register
+    reg s4_valid;
+    reg [31:0] s4_reg_fb_addr;
+    reg [31:0] s4_reg_src_argb;
+
+    // S4 wire
+    wire [31:0] s4_input = rc_d_data;
+    reg [31:0] s4_input_aligned;
+    reg [7:0] s4_da;
+    reg [7:0] s4_dr;
+    reg [7:0] s4_dg;
+    reg [7:0] s4_db;
+    always @(*) begin
+        case (csr_fb_format)
+        `FMT_Y8: begin
+            // Align input to byte
+            case (s4_fb_addr[1:0])
+            2'd0: s4_input_aligned = {24'bx, s4_input[7:0]};
+            2'd1: s4_input_aligned = {24'bx, s4_input[15:8]};
+            2'd2: s4_input_aligned = {24'bx, s4_input[23:16]};
+            2'd3: s4_input_aligned = {24'bx, s4_input[31:24]};
+            endcase
+            s4_da = 8'hFF;
+            s4_dr = s4_input_aligned[7:0];
+            s4_dg = s4_input_aligned[7:0];
+            s4_db = s4_input_aligned[7:0];
+        end
+        `FMT_RGB16: begin
+            case (s4_fb_addr[0])
+            1'd0: s4_input_aligned = {16'bx, s4_input[15:0]};
+            1'd1: s4_input_aligned = {16'bx, s4_input[31:16]};
+            endcase
+            s4_da = 8'hFF;
+            s4_dr = s4_input_aligned[15:11];
+            s4_dg = s4_input_aligned[10:5];
+            s4_db = s4_input_aligned[4:0];
+        end
+        `FMT_ARGB32: begin
+            s4_input_aligned = s4_input;
+            s4_da = s4_input_aligned[31:24];
+            s4_dr = s4_input_aligned[23:16];
+            s4_dg = s4_input_aligned[15:8];
+            s4_db = s4_input_aligned[7:0];
+        end
+        default: begin
+            s4_input_aligned = 32'bx;
+            s4_da = 8'bx;
+            s4_dr = 8'bx;
+            s4_dg = 8'bx;
+            s4_db = 8'bx;
+        end
+        endcase
+    end
+    wire [31:0] s4_dst_argb = {s4_da, s4_dr, s4_dg, s4_db};
+
+    // S5 register
+    reg s5_valid;
+    reg [31:0] s5_reg_fb_addr;
+    reg [31:0] s5_reg_src_argb;
+    reg [31:0] s5_reg_dst_argb;
+
+    // S5 wire
+    wire [15:0] s5_sa_mult = s5_reg_src_argb[31:24] * csr_sa;
+    wire [15:0] s5_sr_mult = s5_reg_src_argb[23:16] * csr_srgb;
+    wire [15:0] s5_sg_mult = s5_reg_src_argb[15:8] * csr_srgb;
+    wire [15:0] s5_sb_mult = s5_reg_src_argb[7:0] * csr_srgb;
+    wire [15:0] s5_da_mult = s5_reg_dst_argb[31:24] * csr_da;
+    wire [15:0] s5_dr_mult = s5_reg_dst_argb[23:16] * csr_drgb;
+    wire [15:0] s5_dg_mult = s5_reg_dst_argb[15:8] * csr_drgb;
+    wire [15:0] s5_db_mult = s5_reg_dst_argb[7:0] * csr_drgb;
+    wire [63:0] s5_src_argb_mult = {s5_sa_mult, s5_sr_mult, s5_sg_mult, s5_sb_mult};
+    wire [63:0] s5_dst_argb_mult = {s5_da_mult, s5_dr_mult, s5_dg_mult, s5_db_mult};
+
+    // S6 register
+    reg s6_valid;
+    reg [31:0] s6_reg_fb_addr;
+    reg [63:0] s6_reg_src_argb_mult;
+    reg [63:0] s6_reg_dst_argb_mult;
+
+    // S6 wire
+    wire [16:0] s6_sa_da_add = s6_reg_sa_mult[63:48] + s6_reg_da_mult[63:48];
+    wire [16:0] s6_sa_da_add = s6_reg_sr_mult[47:32] + s6_reg_dr_mult[47:32];
+    wire [16:0] s6_sa_da_add = s6_reg_sg_mult[31:16] + s6_reg_dg_mult[31:16];
+    wire [16:0] s6_sa_da_add = s6_reg_sb_mult[15:0]  + s6_reg_db_mult[15:0];
+    wire [7:0] s6_oa = s6_sa_da_add[16] ? 8'hff : s6_sa_da_add[15:8];
+    wire [7:0] s6_or = s6_sa_dr_add[16] ? 8'hff : s6_sa_dr_add[15:8];
+    wire [7:0] s6_og = s6_sa_dg_add[16] ? 8'hff : s6_sa_dg_add[15:8];
+    wire [7:0] s6_ob = s6_sa_db_add[16] ? 8'hff : s6_sa_db_add[15:8];
+
+    // Be careful about stall signal, could become the critical path
+    wire rc_stall = rc_a_valid && !rc_a_ready;
+    wire rc_miss = s3_wait_rc && !rc_d_valid;
+    wire stall = !in_valid || rc_stall || rc_miss;
+
+    // The raster cache is expected to be relatively small, and does not
+    // maintain coherency across multiple cache instances
+
+    // For now, no raster op is supported here. It basically writes pixel into
+    // the memory
+    always @(posedge clk) begin
+        if (!stall) begin
+            s1_valid <= in_valid;
+            s1_reg_fb_mult <= s0_fb_mult;
+            s1_reg_x <= in_x;
+            s1_reg_src_argb <= s0_src_argb;
+
+            s2_valid <= s1_valid;
+            s2_reg_fb_addr <= s1_fb_addr;
+            s2_reg_src_argb <= s1_reg_src_argb;
+            // Send memory request
+            rc_a_address <= s1_req_addr;
+            rc_a_opcode <= s1_req_opcode;
+            rc_a_data <= s1_req_data;
+            rc_a_valid <= 1'b1;
+
+            s3_valid <= s2_valid && s2_need_blend;
+            s3_reg_fb_addr <= s2_reg_fb_addr;
+            s3_reg_src_argb <= s2_reg_src_argb;
+
+            s4_valid <= s3_valid;
+            s4_reg_fb_addr <= s3_reg_fb_addr;
+            s4_reg_src_argb <= s3_reg_src_argb;
+            
+            s5_valid <= s4_valid;
+            s5_reg_fb_addr <= s4_reg_fb_addr;
+            s5_reg_src_argb <= s4_reg_src_argb;
+            s5_reg_dst_argb <= s4_dst_argb;
+
+            s6_valid <= s5_valid;
+            s6_reg_fb_addr <= s5_reg_fb_addr;
+            s6_reg_src_argb_mult <= s5_src_argb_mult;
+            s6_reg_dst_argb_mult <= s5_dst_argb_mult;
+        end
+        else begin
+           rc_a_valid <= 1'b0;
+        end
+
+        if (rst) begin
+            rc_a_valid <= 1'b0;
+            rc_d_ready <= 1'b0;
+        end
+    end
+
+    // Assign combinational signals
+    always @(*) begin
+        rc_a_mask = 4'hF;
+        rc_d_ready = !stall;
+        <%
+        for i in range(6):
+            print(f"s{i}_valid <= 1'b0;")
+        %>
+    end
+
+endmodule
+
