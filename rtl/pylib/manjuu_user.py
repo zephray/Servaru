@@ -23,6 +23,7 @@
 
 # Optional library import
 from manjuu_tilelink import *
+from manjuu_base import prefix
 
 ras_req_t = [
     ["i", "left_edge", 13],
@@ -56,6 +57,19 @@ rop_csr_t = [
     ["i", "sa", 9],
     ["i", "da", 9]
 ]
+
+setup_csr_t = [
+    ["i", "x0", 13],
+    ["i", "y0", 13],
+    ["i", "x1", 13],
+    ["i", "y1", 13],
+    ["i", "x2", 13],
+    ["i", "y2", 13],
+    ["i", "trigger_valid"], 
+    ["o", "trigger_ready"]
+]
+
+csr_t = prefix("rop", rop_csr_t) + prefix("setup", setup_csr_t)
 
 define("FMT_Y8", "2'd0")
 define("FMT_RGB16", "2'd1")
