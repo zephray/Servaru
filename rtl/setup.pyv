@@ -1,0 +1,86 @@
+`timescale 1ns / 1ps
+`include "defines.v"
+`default_nettype none
+<% from manjuu import *
+%>
+//
+// Servaru
+// Copyright 2023 Wenting Zhang
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+module setup(
+    input wire clk,
+    input wire rst,
+    // Control and input
+    <% gen_port("csr", setup_csr_t) %>
+    // Output connection to rasterizer
+    <% gen_port("out", reverse(handshake(ras_req_t)), last_comma = False) %>
+);
+
+    <% gen_wire("ec_imem", tl_ul_t()) %>
+    <% gen_wire("ec_dmem", tl_ul_t()) %>
+
+    localparam MICROCODE_DEPTH = 256;
+    localparam MICROCODE_ABITS = $clog2(MICROCODE_DEPTH);
+
+    // RO memory for IMEM
+    reg [31:0] imem [0:MICROCODE_DEPTH-1]; // Size TBD
+    wire imem_rd = (ec_imem_a_opcode == `TL_OP_Get) && ec_imem_a_valid;
+    wire [MICROCODE_ABITS-1:0] imem_addr = ec_imem_a_address[MICROCODE_ABITS-1:0];
+    reg imem_rd_valid;
+    reg [31:0] imem_rd_data;
+    wire imem_rd_stall = ec_imem_rd_valid && !ec_imem_rd_ready;
+    always @(posedge clk) begin
+        if (!imem_rd_stall) begin
+            if (imem_rd) imem_rd_data <= imem[imem_addr];
+            imem_rd_valid <= imem_rd;
+        end
+    end
+    wire ec_imem_a_ready = !imem_rd_stall; // Ignored by EC to avoid comb loop
+    assign ec_imem_d_valid = imem_rd_valid;
+    assign ec_imem_d_opcode = `TL_OP_AccessAckData;
+    assign ec_imem_d_data = imem_rd_data;
+    // Load content
+    initial begin
+        integer r, fp;
+        fp = $fopen("setup_microcode.bin", "r");
+        r = $fread(imem, fp);
+        if (r == 0) $error("Couldn't load microcode for setup!\n");
+        $fclose(fp);
+    end
+
+    // EC core
+    ec #(
+        .IMEM_DEPTH(MICROCODE_DEPTH),
+        .REG_NUM(16),
+        .REG_WIDTH(32),
+        .USE_MUL(1),
+        .BOOT_VECTOR(0)
+    ) ec (
+        .clk(clk),
+        .rst(rst),
+        <% gen_connect("imem", tl_ul_t(), "ec_imem") %>
+        <% gen_connect("dmem", tl_ul_t(), "ec_dmem", last_comma = False) %>
+    );
+
+    // MMIO for EC core
+    <% tl_ul_csr_ep(prefix("csr", reverse(setup_csr_t)) + prefix("out", handshake(ras_req_t)), "", "ec_dmem") %>
+
+endmodule

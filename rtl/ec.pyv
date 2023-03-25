@@ -1,0 +1,280 @@
+`timescale 1ns / 1ps
+`include "defines.v"
+`default_nettype none
+<% from manjuu import *
+%>
+//
+// Servaru
+// Copyright 2023 Wenting Zhang
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+// Limitations:
+//   - Imem/ Dmem should always be available for accepting new requests
+module ec #(
+    parameter IMEM_DEPTH = 256,
+    parameter REG_NUM = 16,
+    parameter REG_WIDTH = 32,
+    parameter USE_MUL = 1,
+    parameter BOOT_VECTOR = 0
+) (
+    input wire clk,
+    input wire rst,
+    // Interface for I-mem
+    <% gen_port("imem", reverse(tl_ul_t()), reg = False) %>
+    // Interface for D-mem
+    <% gen_port("dmem", reverse(tl_ul_t()), last_comma = False) %>
+);
+
+    localparam RS_WIDTH = $clog2(REG_NUM);
+    localparam PC_WIDTH = $clog2(IMEM_DEPTH);
+
+    // Stall handling
+    reg imem_requested;
+    wire imem_not_ready = imem_requested && !imem_d_valid;
+    wire dmem_tag_fifo_full; // TODO: This currrently stalls non memory op
+    wire scoreboard_block;
+
+    wire stalled = rst || imem_not_ready || dmem_tag_fifo_full || scoreboard_block;
+
+    // Signal declaring for feed-back
+    wire pc_redirect;
+    wire [PC_WIDTH-1:0] pc_redirect_target;
+
+    // Fetch
+    reg [PC_WIDTH-1:0] pc;
+    wire [PC_WIDTH-1:0] pc_plus_4 = pc + 4;
+    wire [PC_WIDTH-1:0] next_pc = pc_redirect ? alu_result : pc_plus_4;
+
+    assign imem_a_opcode = `TL_OP_Get;
+    assign imem_a_address = next_pc;
+    assign imem_a_mask = 4'hf;
+    assign imem_a_data = 32'bx;
+    assign imem_a_valid = !stalled; 
+    assign imem_d_ready = !stalled;
+    always @(posedge clk) begin
+        if (!stalled) begin
+            imem_requested <= imem_a_valid;
+        end
+        if (rst) begin
+            imem_requested <= 1'b0;
+        end
+    end
+
+    always @(posedge clk) begin
+        pc <= next_pc;
+        if (rst)
+            pc <= BOOT_VECTOR;
+    end
+
+    // Execute
+    wire [31:0] instr = imem_d_data;
+    wire [4:0] rs1 = instr[19:15];
+    wire [4:0] rs2 = instr[24:20];
+    wire [4:0] rd = instr[11:7];
+    wire [6:0] opcode = instr[6:0];
+    wire [2:0] funct3 = instr[14:12];
+    wire [6:0] funct7 = instr[31:20];
+    wire op_lui    = opcode == 7'b0110111;
+    wire op_auipc  = opcode == 7'b0010111;
+    wire op_jal    = opcode == 7'b1101111;
+    wire op_jalr   = opcode == 7'b1100111;
+    wire op_branch = opcode == 7'b1100011;
+    wire op_load   = opcode == 7'b0000011;
+    wire op_store  = opcode == 7'b0100011;
+    wire op_intimm = opcode == 7'b0010011;
+    wire op_intreg = opcode == 7'b0110011;
+    wire [31:0] imm_i_type = {{20{instr[31]}}, instr[31:20]};
+    wire [31:0] imm_s_type = {{20{instr[31]}}, instr[31:25], instr[11:7]};
+    wire [31:0] imm_b_type = {{19{instr[31]}}, instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};
+    wire [31:0] imm_u_type = {instr[31:12], 12'b0};
+    wire [31:0] imm_j_type = {{11{instr[31]}}, instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
+    (* onehot *)
+    wire [7:0] funct3_onehot = 8'd1 << funct3;
+    // Branch function
+    wire beq = funct3[0];
+    wire bne = funct3[1];
+    wire blt = funct3[4];
+    wire bge = funct3[5];
+    wire bltu = funct3[6];
+    wire bgeu = funct3[7];
+    // ALU function for intimm / intreg
+    wire aadd = funct3[0] && !funct7[6];
+    wire asub = funct3[0] && funct7[6];
+    wire asll = funct3[1];
+    wire aslt = funct3[2];
+    wire asltu = funct3[3];
+    wire axor = funct3[4];
+    wire asrl = funct3[5] && !funct7[6];
+    wire asra = funct3[5] && funct7[6];
+    wire aor = funct3[6];
+    wire aand = funct3[7];
+    // Memory options
+    wire mb = funct3[0];
+    wire mh = funct3[1];
+    wire mw = funct3[2];
+    wire mbu = funct3[3];
+    wire mhu = funct3[4];
+
+    wire [RS_WIDTH-1:0] rf_rs0 = rs1[RS_WIDTH-1:0];
+    wire [RS_WIDTH-1:0] rf_rs1 = rs2[RS_WIDTH-1:0];
+    reg [REG_WIDTH-1:0] rf [1:REG_NUM-1];
+    wire [REG_WIDTH-1:0] rf_rval0 = (rf_rs0 == 0) ? 0 : rf[rf_rs0];
+    wire [REG_WIDTH-1:0] rf_rval1 = (rf_rs1 == 0) ? 0 : rf[rf_rs1];
+
+    // ALU is used for
+    // - Integer calculation (imm/reg and reg), I type/ R type
+    // - Conditional comparison (reg), B type
+    // - JALR target address calculation  (imm and pc), I type
+    // Not used for
+    // - Address generation during load and store (imm and reg)
+    // - Branch target calculation
+    // - LUI result
+    // - AUIPC result calculation (imm and pc)
+    // - JAL target (simply sign extension)
+    wire alu_op0_pc = op_jalr;
+    wire [REG_WIDTH-1:0] alu_op0 = alu_op0_pc ? pc : rf_rval0;
+
+    wire alu_op1_imm = op_jalr || op_intimm;
+    wire [REG_WIDTH-1:0] alu_op1 = alu_op1_imm ? imm_i_type : rf_rval1;
+
+    wire [REG_WIDTH-1:0] alu_adder = alu_op0 + alu_op1;
+    wire [REG_WIDTH:0] alu_subs = {1'b0, alu_op0} + {1'b1, ~alu_op1} + 1'b1;
+    wire cond_lt = (alu_op0[REG_WIDTH-1] ^ alu_op1[REG_WIDTH-1]) ? alu_op0[REG_WIDTH-1] : alu_subs[REG_WIDTH];
+    wire cond_ltu = alu_subs[REG_WIDTH];
+    wire cond_eq = alu_op0 == alu_op1;
+
+    wire rs1en = op_branch || op_intreg || op_intimm;
+    wire rs2en = op_branch || op_intreg;
+
+    wire [REG_WIDTH-1:0] alu_result =
+        aadd ? alu_adder :
+        asub ? alu_subs[REG_WIDTH-1:0] :
+        asll ? {alu_op0[REG_WIDTH-2:0], 1'b0} :
+        aslt ? {{(REG_WIDTH-1){1'b0}}, lt} :
+        asltu ? {{(REG_WIDTH-1){1'b0}}, ltu} :
+        axor ? (alu_op0 ^ alu_op1) :
+        asrl ? {1'b0, alu_op0[REG_WIDTH-1:1]} :
+        asra ? {alu_op0[REG_WIDTH-1], alu_op0[REG_WIDTH-1:1]} :
+        aor ? (alu_op0 | alu_op1) :
+        (alu_op0 & alu_op1);
+
+    wire branch_taken =
+        beq && cond_eq ||
+        bne && !cond_eq ||
+        blt && cond_lt ||
+        bge && !cond_lt ||
+        bltu && cond_ltu ||
+        bltu && !cont_ltu;
+
+    assign pc_redirect = (op_branch && branch_taken) || op_jal || op_jalr;
+    wire [PC_WIDTH-1:0] cfi_adder = pc +
+        (instr[3] ? imm_j_type : // JAL
+        instr[4] ? imm_u_type : // AUIPC
+        imm_b_type); // Bcond
+    assign pc_redirect_target = op_jalr ? alu_adder : cfi_adder;
+    
+    wire wb_value =
+        op_lui ? imm_u_type :
+        op_auipc ? cfi_adder :
+        (op_jal || op_jalr) ? pc_plus_4 :
+        alu_result;
+    wire wb_en = (rd != 0) &&
+        (op_lui || op_auipc || op_jal || op_jalr || op_intimm || op_intreg);
+
+    always @(posedge clk) begin
+        if (wb_en && !stalled) begin
+            rf[rd] <= wb_value;
+        end
+    end
+
+    // DMEM access
+    wire [REG_WIDTH-1:0] dmem_addr_offset = op_store ? imm_s_type : imm_i_type;
+    wire [REG_WIDTH-1:0] dmem_addr = rf_rval0 + dmem_addr_offset;
+
+    wire [31:0] wdata_word = rf_rval0;
+    wire [31:0] wdata_byte = {4{wdata_w[7:0]}};
+    wire [31:0] wdata_half = {2{wdata_w[15:0]}};
+    wire [31:0] wdata = mb ? wdata_byte : mh ? wdata_half : wdata_word;
+
+    wire [3:0] wmask_byte;
+    wire [3:0] wmask_half;
+    genvar i;
+    generate
+    for (i = 0; i < 4; i = i + 1) begin
+        assign wmask_byte[i] = (dmem_addr[1:0] == i);
+    end
+    for (i = 0; i < 2; i = i + 1) begin
+        assign wmask_half[i*2+1:i*2] = {2{wmask_byte[i*2]}};
+    end
+    endgenerate
+    wire [3:0] wmask = mb ? wmask_byte : mh ? wmask_half : 4'hf;
+
+    assign dmem_a_opcode = op_load ? `TL_OP_Get :
+        wdata_w ? `TL_OP_PutFullData : `TL_OP_PutPartialData;
+    assign dmem_a_address = dmem_addr;
+    assign dmem_a_mask = wmask;
+    assign dmem_a_data = wdata;
+    assign dmem_a_valid = (op_load || op_store) && !stalled;
+
+    wire ll_dmem_wb_en = dmem_d_valid && dmem_d_ready &&
+        (dmem_d_opcode == `TL_OP_AccessAckData);
+    wire dmem_d_ready = 1'b1; // This should not depend on stall to avoid deadlock
+    wire [REG_WIDTH-1:0] ll_dmem_wb_data = dmem_d_data;
+    wire [RS_WIDTH-1:0] ll_dmem_wb_tag;
+
+    localparam MAX_MEM = 4; // Maximum in-flight memory loads
+    fifo_nd #(.WIDTH(RS_WIDTH), .depth(MAX_MEM)) dmem_tags (
+        .clk(clk),
+        .rst(rst),
+        .a_data(rd),
+        .a_valid(dmem_a_valid),
+        .a_ready(dmem_tag_fifo_full),
+        .b_data(ll_dmem_wb_tag),
+        .b_valid(),
+        .b_ready(ll_dmem_wb_en)
+    );
+
+    // Long latency access
+    reg [31:1] ll_scoreboard;
+    wire ll_scoreboard_rs1_raw = (rs1 != 0) && rs1_en && ll_scoreboard[rs1];
+    wire ll_scoreboard_rs2_raw = (rs2 != 0) && rs2_en && ll_scoreboard[rs2];
+    wire ll_scoreboard_rd_waw = wb_en && ll_scoreboard[rd];
+    wire scoreboard_block = ll_scoreboard_rs1_raw || ll_scoreboard_rs2_raw ||
+        ll_scoreboard_rd_waw;
+
+    wire ll_wb_en = ll_dmem_wb_en;
+    wire [REG_WIDTH-1:0] ll_wb_data = ll_dmem_wb_data;
+    wire [RS_WIDTH-1:0] ll_wb_tag = ll_dmem_wb_tag;
+
+    wire ll_set_en = dmem_a_valid;
+    wire [RS_WIDTH-1:0] ll_set_tag = rd;
+
+    always @(posedge clk) begin
+        if (ll_wb_en) begin
+            // Writeback register
+            rf[ll_wb_tag] <= ll_wb_data;
+            // Clear scoreboard
+            scoreboard[ll_wb_tag] <= 1'b0;
+            // Set scoreboard
+            scoreboard[ll_set_tag] <= 1'b1;
+        end
+    end
+
+endmodule
